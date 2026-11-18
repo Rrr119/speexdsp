@@ -1,7 +1,7 @@
 # Disable automatic dependency tracking if using other tools than gcc and gmake
 #AUTOMAKE_OPTIONS = no-dependencies
 
-EXTRA_DIST=echo_diagnostic.m
+EXTRA_DIST=echo_diagnostic.m test_echo_doubletalk.sh
 
 AM_CPPFLAGS = -I$(top_srcdir)/include -I$(top_builddir)/include/speex -I$(top_builddir) @FFT_CFLAGS@
 
@@ -32,15 +32,22 @@ libspeexdsp_la_LDFLAGS = -no-undefined -version-info @SPEEXDSP_LT_CURRENT@:@SPEE
 libspeexdsp_la_LIBADD = $(LIBM)
 
 if BUILD_EXAMPLES
-noinst_PROGRAMS = testdenoise testecho testjitter testresample testresample2
+noinst_PROGRAMS = testdenoise testecho testjitter testresample testresample2 \
+                  testecho_dtd_gen testecho_dtd
 testdenoise_SOURCES = testdenoise.c
 testdenoise_LDADD = libspeexdsp.la @FFT_LIBS@
 testecho_SOURCES = testecho.c
 testecho_LDADD = libspeexdsp.la @FFT_LIBS@
+testecho_dtd_gen_SOURCES = testecho_dtd_gen.c
+testecho_dtd_gen_LDADD = @LIBM@
+testecho_dtd_SOURCES = testecho_dtd.c
+testecho_dtd_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
 testjitter_SOURCES = testjitter.c
 testjitter_LDADD = libspeexdsp.la @FFT_LIBS@
 testresample_SOURCES = testresample.c
 testresample_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
 testresample2_SOURCES = testresample2.c
 testresample2_LDADD = libspeexdsp.la @FFT_LIBS@ @LIBM@
+
+TESTS = test_echo_doubletalk.sh
 endif

@@ -211,6 +211,15 @@ int speex_preprocess_ctl(SpeexPreprocessState *st, int request, void *ptr);
 /** Get preprocessor Automatic Gain Control level (int32) */
 #define SPEEX_PREPROCESS_GET_AGC_TARGET 47
 
+/** Set the maximum residual echo suppression (in dB negative, same convention
+ * as SPEEX_PREPROCESS_SET_ECHO_SUPPRESS) applied while the echo canceller
+ * reports double-talk. A milder floor (e.g. -15 dB instead of the default
+ * -40 dB) keeps the near-end speaker from being attenuated during double-talk.
+ * Default is -15. */
+#define SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_DOUBLETALK 48
+/** Get the double-talk residual echo suppression level (dB) */
+#define SPEEX_PREPROCESS_GET_ECHO_SUPPRESS_DOUBLETALK 49
+
 #ifdef __cplusplus
 }
 #endif

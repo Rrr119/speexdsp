@@ -59,6 +59,27 @@ extern "C" {
 /** Get impulse response (int32[]) */
 #define SPEEX_ECHO_GET_IMPULSE_RESPONSE 29
 
+/** Get the current double-talk state (int32): 0 when no double-talk is
+ * detected, 1 when near-end speech is detected on top of the far-end echo.
+ * The state is updated at the end of each speex_echo_cancellation() call,
+ * so the value reflects the most recently processed frame. */
+#define SPEEX_ECHO_GET_DOUBLETALK 30
+
+/** Get the smoothed double-talk probability of the last frame (int32 in
+ * Q15, ranging from 0 to 32767). 0 means far-end only, 32767 means strong
+ * double-talk. Can be used by an external post-filter to relax residual
+ * echo suppression while the near end is talking. */
+#define SPEEX_ECHO_GET_DOUBLETALK_PROB 31
+
+/** Set the minimum fraction of the adaptation step kept while double-talk
+ * is detected (int32 in Q15, 0 to 32767). A small non-zero value lets the
+ * filter track slow echo-path changes without diverging on near-end speech.
+ * Default is 3277 (0.10). Set to 0 to fully freeze adaptation on double-talk. */
+#define SPEEX_ECHO_SET_DT_ADAPT_FLOOR 32
+
+/** Get the double-talk adaptation step floor (int32 in Q15) */
+#define SPEEX_ECHO_GET_DT_ADAPT_FLOOR 33
+
 /** Internal echo canceller state. Should never be accessed directly. */
 struct SpeexEchoState_;
 

@@ -79,6 +79,7 @@
 #define NOISE_SUPPRESS_DEFAULT       -15
 #define ECHO_SUPPRESS_DEFAULT        -40
 #define ECHO_SUPPRESS_ACTIVE_DEFAULT -15
+#define ECHO_SUPPRESS_DOUBLETALK_DEFAULT -15
 
 #ifndef NULL
 #define NULL 0
@@ -193,6 +194,7 @@ struct SpeexPreprocessState_ {
    int    noise_suppress;
    int    echo_suppress;
    int    echo_suppress_active;
+   int    echo_suppress_doubletalk;
    SpeexEchoState *echo_state;
 
    spx_word16_t	speech_prob;  /**< Probability last frame was speech */
@@ -431,6 +433,7 @@ EXPORT SpeexPreprocessState *speex_preprocess_state_init(int frame_size, int sam
    st->noise_suppress = NOISE_SUPPRESS_DEFAULT;
    st->echo_suppress = ECHO_SUPPRESS_DEFAULT;
    st->echo_suppress_active = ECHO_SUPPRESS_ACTIVE_DEFAULT;
+   st->echo_suppress_doubletalk = ECHO_SUPPRESS_DOUBLETALK_DEFAULT;
 
    st->speech_prob_start = SPEECH_PROB_START_DEFAULT;
    st->speech_prob_continue = SPEECH_PROB_CONTINUE_DEFAULT;
@@ -731,6 +734,7 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    spx_word16_t Pframe;
    spx_word16_t beta, beta_1;
    spx_word16_t effective_echo_suppress;
+   spx_word16_t dt_prob = 0;
 
    st->nb_adapt++;
    if (st->nb_adapt>20000)
@@ -743,6 +747,7 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    /* Deal with residual echo if provided */
    if (st->echo_state)
    {
+      spx_int32_t dt_q15 = 0;
       speex_echo_get_residual(st->echo_state, st->residual_echo, N);
 #ifndef FIXED_POINT
       /* If there are NaNs or ridiculous values, it'll show up in the DC and we just reset everything to zero */
@@ -752,8 +757,27 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
             st->residual_echo[i] = 0;
       }
 #endif
+      /* Query the echo canceller's double-talk probability (Q15). While the
+         near end is talking, holding the maximum residual-echo estimate would
+         turn near-end speech into a permanent echo estimate and crush it, so
+         decay the estimate instead during double-talk. */
+      speex_echo_ctl(st->echo_state, SPEEX_ECHO_GET_DOUBLETALK_PROB, &dt_q15);
+      if (dt_q15 < 0)
+         dt_q15 = 0;
+      else if (dt_q15 > 32767)
+         dt_q15 = 32767;
+#ifdef FIXED_POINT
+      dt_prob = EXTRACT16(dt_q15);
+#else
+      dt_prob = (spx_word16_t)(dt_q15 / 32768.f);
+#endif
       for (i=0;i<N;i++)
-         st->echo_noise[i] = MAX32(MULT16_32_Q15(QCONST16(.6f,15),st->echo_noise[i]), st->residual_echo[i]);
+      {
+         if (dt_prob > QCONST16(.5f,15))
+            st->echo_noise[i] = MULT16_32_Q15(QCONST16(.9f,15), st->echo_noise[i]);
+         else
+            st->echo_noise[i] = MAX32(MULT16_32_Q15(QCONST16(.6f,15),st->echo_noise[i]), st->residual_echo[i]);
+      }
       filterbank_compute_bank32(st->bank, st->echo_noise, st->echo_noise+N);
    } else {
       for (i=0;i<N+M;i++)
@@ -820,7 +844,16 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
       Zframe = ADD32(Zframe, EXTEND32(st->zeta[i]));
    Pframe = QCONST16(.1f,15)+MULT16_16_Q15(QCONST16(.899f,15),qcurve(DIV32_16(Zframe,st->nbands)));
 
-   effective_echo_suppress = EXTRACT16(PSHR32(ADD32(MULT16_16(SUB16(Q15_ONE,Pframe), st->echo_suppress), MULT16_16(Pframe, st->echo_suppress_active)),15));
+   /* Blend between the idle (aggressive) echo suppression and the milder
+      double-talk floor according to the echo canceller's double-talk
+      probability, so near-end speech is not suppressed together with the
+      residual echo. */
+   {
+      spx_word16_t base_suppress;
+      base_suppress = EXTRACT16(PSHR32(ADD32(MULT16_16(SUB16(Q15_ONE,Pframe), st->echo_suppress), MULT16_16(Pframe, st->echo_suppress_active)),15));
+      effective_echo_suppress = EXTRACT16(PSHR32(ADD32(MULT16_16(SUB16(Q15_ONE,dt_prob), base_suppress),
+                                                     MULT16_16(dt_prob, st->echo_suppress_doubletalk)),15));
+   }
 
    compute_gain_floor(st->noise_suppress, effective_echo_suppress, st->noise+N, st->echo_noise+N, st->gain_floor+N, M);
 
@@ -1160,6 +1193,12 @@ EXPORT int speex_preprocess_ctl(SpeexPreprocessState *state, int request, void *
       break;
    case SPEEX_PREPROCESS_GET_ECHO_SUPPRESS_ACTIVE:
       (*(spx_int32_t*)ptr) = st->echo_suppress_active;
+      break;
+   case SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_DOUBLETALK:
+      st->echo_suppress_doubletalk = -ABS(*(spx_int32_t*)ptr);
+      break;
+   case SPEEX_PREPROCESS_GET_ECHO_SUPPRESS_DOUBLETALK:
+      (*(spx_int32_t*)ptr) = st->echo_suppress_doubletalk;
       break;
    case SPEEX_PREPROCESS_SET_ECHO_STATE:
       st->echo_state = (SpeexEchoState*)ptr;

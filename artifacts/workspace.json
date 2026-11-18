@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid26335",
+  "B": "/home/dev/feedback/uid26335",
+  "sha": "4f950a1ecd56e14f1e0a03e5a0f88a2823d7f1da",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "xiph",
+    "repo": "speexdsp",
+    "sha": "4f950a1ecd56e14f1e0a03e5a0f88a2823d7f1da"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "speexdsp",
+    "cloneUrl": "https://github.com/Rrr119/speexdsp.git"
+  },
+  "at": "2026-11-18T19:31:00.244Z"
+}

@@ -76,6 +76,11 @@
 #include "math_approx.h"
 #include "os_support.h"
 
+#ifdef DTD_DEBUG
+#include <math.h>
+#include <stdlib.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -103,6 +108,25 @@ static const spx_float_t VAR2_UPDATE = {16384, -16};
 static const spx_float_t VAR_BACKTRACK = {16384, -12};
 #define TOP16(x) ((x)>>16)
 
+/* Constants for the explicit double-talk detector (DTD) */
+/* Below this mic/echo power ratio the frame is treated as an echo gap */
+static const spx_float_t DT_GEIGEL_FLOOR = {8192, -15};
+/* Geigel power ratio required to enter / leave the double-talk state */
+static const spx_float_t DT_GEIGEL_ENTER = {18842, -13};
+static const spx_float_t DT_GEIGEL_REL = {10650, -13};
+/* Averaged normalized cross-correlation entering/leaving the double-talk state */
+static const spx_float_t DT_CORR_ENTER = {16384, -15};
+static const spx_float_t DT_CORR_EXIT = {21299, -15};
+/* Smoothing of the per-frame normalized cross-correlation */
+static const spx_float_t DT_CORR_SMOOTH = {16384, -15};
+/* Fraction of the adaptation step kept while double-talk is active. Keeping
+   a quarter of the step lets the filter recover promptly after a false alarm
+   instead of locking into an under-adapted state. */
+#define DT_ADAPT_FLOOR_DEFAULT QCONST16(.25f, 15)
+/* Consecutive evidence / recovery frames required to toggle the state */
+#define DT_ENTRY_FRAMES 2
+#define DT_EXIT_FRAMES 4
+
 #else
 
 static const spx_float_t MIN_LEAK = .005f;
@@ -114,6 +138,17 @@ static const spx_float_t VAR1_UPDATE = .5f;
 static const spx_float_t VAR2_UPDATE = .25f;
 static const spx_float_t VAR_BACKTRACK = 4.f;
 #define TOP16(x) (x)
+
+/* Constants for the explicit double-talk detector (DTD) */
+static const spx_float_t DT_GEIGEL_FLOOR = .25f;
+static const spx_float_t DT_GEIGEL_ENTER = 2.3f;
+static const spx_float_t DT_GEIGEL_REL = 1.3f;
+static const spx_float_t DT_CORR_ENTER = .5f;
+static const spx_float_t DT_CORR_EXIT = .65f;
+static const spx_float_t DT_CORR_SMOOTH = .5f;
+#define DT_ADAPT_FLOOR_DEFAULT QCONST16(.25f, 15)
+#define DT_ENTRY_FRAMES 2
+#define DT_EXIT_FRAMES 4
 #endif
 
 
@@ -139,6 +174,12 @@ struct SpeexEchoState_ {
    spx_word16_t beta_max;
    spx_word32_t sum_adapt;
    spx_word16_t leak_estimate;
+   spx_word16_t double_talk;       /**< Smoothed double-talk probability (Q15) */
+   spx_word16_t dt_adapt_floor;    /**< Min adaptation step fraction during double-talk (Q15) */
+   spx_word16_t dt_adapt_gate;     /**< Per-frame adaptation step multiplier (Q15) */
+   spx_float_t dt_ycorr;           /**< Smoothed mic/echo normalized cross-correlation */
+   int dt_low_count;               /**< Consecutive frames with low mic/echo correlation */
+   int dt_release_count;           /**< Consecutive recovered frames while in double-talk */
 
    spx_word16_t *e;      /* scratch */
    spx_word16_t *x;      /* Far-end input buffer (2N) */
@@ -434,6 +475,13 @@ EXPORT SpeexEchoState *speex_echo_state_init_mc(int frame_size, int filter_lengt
    st->beta_max = (.5f*st->frame_size)/st->sampling_rate;
 #endif
    st->leak_estimate = 0;
+   st->double_talk = 0;
+   st->dt_adapt_floor = DT_ADAPT_FLOOR_DEFAULT;
+#ifdef FIXED_POINT
+   st->dt_adapt_gate = 32767;
+#else
+   st->dt_adapt_gate = 1.f;
+#endif
 
    st->fft_table = spx_fft_init(N);
 
@@ -507,6 +555,9 @@ EXPORT SpeexEchoState *speex_echo_state_init_mc(int frame_size, int filter_lengt
    st->notch_mem = (spx_mem_t*)speex_alloc(2*C*sizeof(spx_mem_t));
    st->adapted = 0;
    st->Pey = st->Pyy = FLOAT_ONE;
+   st->dt_ycorr = FLOAT_ONE;
+   st->dt_low_count = 0;
+   st->dt_release_count = 0;
 
 #ifdef TWO_PATH
    st->Davg1 = st->Davg2 = 0;
@@ -567,11 +618,20 @@ EXPORT void speex_echo_state_reset(SpeexEchoState *st)
    st->saturated = 0;
    st->adapted = 0;
    st->sum_adapt = 0;
+   st->double_talk = 0;
+#ifdef FIXED_POINT
+   st->dt_adapt_gate = 32767;
+#else
+   st->dt_adapt_gate = 1.f;
+#endif
    st->Pey = st->Pyy = FLOAT_ONE;
 #ifdef TWO_PATH
    st->Davg1 = st->Davg2 = 0;
    st->Dvar1 = st->Dvar2 = FLOAT_ZERO;
 #endif
+   st->dt_ycorr = FLOAT_ONE;
+   st->dt_low_count = 0;
+   st->dt_release_count = 0;
    for (i=0;i<3*st->frame_size;i++)
       st->play_buf[i] = 0;
    st->play_buf_pos = PLAYBACK_DELAY*st->frame_size;
@@ -688,6 +748,7 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
    int i,j, chan, speak;
    int N,M, C, K;
    spx_word32_t Syy,See,Sxx,Sdd, Sff;
+   spx_word32_t Sdy;
 #ifdef TWO_PATH
    spx_word32_t Dbf;
    int update_foreground;
@@ -956,7 +1017,7 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
    }
 #endif
 
-   Sey = Syy = Sdd = 0;
+   Sey = Syy = Sdd = Sdy = 0;
    for (chan = 0; chan < C; chan++)
    {
       /* Compute error signal (for the output with de-emphasis) */
@@ -995,6 +1056,9 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
       Sey += mdf_inner_prod(st->e+chan*N+st->frame_size, st->y+chan*N+st->frame_size, st->frame_size);
       Syy += mdf_inner_prod(st->y+chan*N+st->frame_size, st->y+chan*N+st->frame_size, st->frame_size);
       Sdd += mdf_inner_prod(st->input+chan*st->frame_size, st->input+chan*st->frame_size, st->frame_size);
+      /* Cross-energy between the mic and the estimated echo (delay-aligned
+         by the adaptive filter), used by the double-talk detector */
+      Sdy += mdf_inner_prod(st->input+chan*st->frame_size, st->y+chan*N+st->frame_size, st->frame_size);
 
       /* Convert error to frequency domain */
       spx_fft(st->fft_table, st->e+chan*N, st->E+chan*N);
@@ -1043,6 +1107,110 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
    {
       Sxx += mdf_inner_prod(st->x+speak*N+st->frame_size, st->x+speak*N+st->frame_size, st->frame_size);
       power_spectrum_accum(st->X+speak*N, st->Xf, N);
+   }
+
+   /* Explicit double-talk detection (DTD). The detector only runs once the
+      filter has converged, otherwise an under-estimated echo would look like
+      near-end speech. Two complementary statistics are combined with an AND:
+      - the normalized cross-correlation between the mic and the delay-aligned
+        echo estimate y (Sdy^2/(Syy*Sdd)): echo is strongly correlated with y,
+        independent near-end speech drives it down;
+      - a Geigel-like power ratio Sdd/Syy: genuine double-talk raises the mic
+        energy above what the echo path can explain.
+      Requiring both rejects false alarms during far-end speech gaps (low
+      correlation, but also low Geigel ratio). Per-frame estimates are averaged
+      and a state machine with entry/exit confirmation avoids chattering. */
+   {
+      /* Far-end activity scale matching the pre-adaptation logic: mdf_inner_prod
+         divides by 64, so the effective threshold is ~N*1000 (2e6 for N=256) */
+      spx_word32_t far_active_thresh = MULT16_16(N, 1000);
+      spx_word32_t mic_floor = SHR32(MULT16_16(N, 100),6);
+      if (st->adapted && Sxx > far_active_thresh && Sdd > mic_floor && Syy > mic_floor)
+      {
+         spx_float_t ycorr = FLOAT_DIVU(FLOAT_MUL32U(ABS32(Sdy), ABS32(Sdy)),
+                                        FLOAT_MUL32U(Syy, Sdd));
+         spx_float_t geigel = FLOAT_DIV32(Sdd, Syy + mic_floor);
+         int frame_dt;
+#ifdef DTD_DEBUG
+      if (getenv("DTD_DEBUG"))
+         fprintf(stderr, "f=%d Sxx=%d Sdd=%d Syy=%d geigel=%f ycorr=%f avg=%f dt=%f gate=%f adapted=%d\n",
+                 st->cancel_count, (int)Sxx, (int)Sdd, (int)Syy,
+#ifdef FIXED_POINT
+                 (double)geigel.m*exp2(geigel.e), (double)ycorr.m*exp2(ycorr.e),
+                 (double)st->dt_ycorr.m*exp2(st->dt_ycorr.e),
+                (double)st->double_talk/32768.0,
+                (double)st->dt_adapt_gate/32768.0,
+#else
+                geigel, ycorr, st->dt_ycorr, st->double_talk, st->dt_adapt_gate,
+#endif
+                 (int)st->adapted);
+#endif
+         /* Average the correlation only when the echo estimate is meaningful,
+            so a far-end speech gap (where y has not built up) cannot drag the
+            average down and trigger a false alarm. */
+         if (FLOAT_GT(geigel, DT_GEIGEL_FLOOR))
+            st->dt_ycorr = FLOAT_ADD(FLOAT_MULT(DT_CORR_SMOOTH, st->dt_ycorr),
+                                     FLOAT_MULT(FLOAT_SUB(FLOAT_ONE, DT_CORR_SMOOTH), ycorr));
+
+         /* Double-talk evidence requires BOTH a decorrelation from the echo
+            estimate and more mic energy than the echo path can explain. */
+         frame_dt = FLOAT_LT(st->dt_ycorr, DT_CORR_ENTER) &&
+                    FLOAT_GT(geigel, DT_GEIGEL_ENTER);
+
+         if (st->double_talk > QCONST16(.5f, 15))
+         {
+            /* While in double-talk, exit only after the correlation recovers
+               for several frames (hysteresis), so brief dips do not toggle. */
+            if (FLOAT_GT(st->dt_ycorr, DT_CORR_EXIT) || FLOAT_LT(geigel, DT_GEIGEL_REL))
+               st->dt_release_count++;
+            else
+               st->dt_release_count = 0;
+            if (st->dt_release_count >= DT_EXIT_FRAMES)
+            {
+               st->double_talk = 0;
+               st->dt_low_count = 0;
+               st->dt_release_count = 0;
+            }
+         } else if (frame_dt)
+         {
+            /* Require several consecutive evidence frames before declaring
+               double-talk, so single-frame transients do not slow adaptation. */
+            st->dt_low_count++;
+            if (st->dt_low_count >= DT_ENTRY_FRAMES)
+            {
+#ifdef FIXED_POINT
+               st->double_talk = 32767;
+#else
+               st->double_talk = 1.f;
+#endif
+               st->dt_release_count = 0;
+            }
+         } else {
+               st->dt_low_count = 0;
+         }
+      } else {
+         /* No far-end activity: release quickly so the next double-talk
+            episode starts from a clean state and a stale correlation average
+            cannot trigger a false alarm when speech resumes. */
+         st->double_talk = 0;
+         st->dt_ycorr = FLOAT_ONE;
+         st->dt_low_count = 0;
+         st->dt_release_count = 0;
+      }
+   }
+
+   /* Adaptation step gate: keep the full step in the far-end-only case and only
+      a small floor while double-talk is active, so the filter neither diverges on
+      near-end speech nor loses track of a slowly changing echo path. */
+   {
+#ifdef FIXED_POINT
+      spx_word16_t dt_step = SUB16(32767, st->double_talk);
+      st->dt_adapt_gate = ADD16(MULT16_16_Q15(dt_step, SUB16(32767, st->dt_adapt_floor)),
+                                 st->dt_adapt_floor);
+#else
+      st->dt_adapt_gate = st->double_talk * st->dt_adapt_floor +
+                          (1.f - st->double_talk) * 1.f;
+#endif
    }
 
 
@@ -1144,7 +1312,7 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
 #endif
          r = MULT16_32_Q15(QCONST16(.7,15),r) + MULT16_32_Q15(QCONST16(.3,15),(spx_word32_t)(MULT16_32_Q15(RER,e)));
          /*st->power_1[i] = adapt_rate*r/(e*(1+st->power[i]));*/
-         st->power_1[i] = FLOAT_SHL(FLOAT_DIV32_FLOAT(r,FLOAT_MUL32U(e,st->power[i]+10)),WEIGHT_SHIFT+16);
+         st->power_1[i] = FLOAT_SHL(FLOAT_DIV32_FLOAT(MULT16_32_Q15(st->dt_adapt_gate, r),FLOAT_MUL32U(e,st->power[i]+10)),WEIGHT_SHIFT+16);
       }
    } else {
       /* Temporary adaption rate if filter is not yet adapted enough */
@@ -1163,7 +1331,7 @@ EXPORT void speex_echo_cancellation(SpeexEchoState *st, const spx_int16_t *in, c
          adapt_rate = FLOAT_EXTRACT16(FLOAT_SHL(FLOAT_DIV32(tmp32, See),15));
       }
       for (i=0;i<=st->frame_size;i++)
-         st->power_1[i] = FLOAT_SHL(FLOAT_DIV32(EXTEND32(adapt_rate),ADD32(st->power[i],10)),WEIGHT_SHIFT+1);
+         st->power_1[i] = FLOAT_SHL(FLOAT_DIV32(EXTEND32(MULT16_16_Q15(st->dt_adapt_gate, adapt_rate)),ADD32(st->power[i],10)),WEIGHT_SHIFT+1);
 
 
       /* How much have we adapted so far? */
@@ -1247,6 +1415,41 @@ EXPORT int speex_echo_ctl(SpeexEchoState *st, int request, void *ptr)
          break;
       case SPEEX_ECHO_GET_SAMPLING_RATE:
          (*(int*)ptr) = st->sampling_rate;
+         break;
+      case SPEEX_ECHO_GET_DOUBLETALK:
+#ifdef FIXED_POINT
+         (*(spx_int32_t*)ptr) = st->double_talk > QCONST16(.5f,15) ? 1 : 0;
+#else
+         (*(spx_int32_t*)ptr) = st->double_talk > .5f ? 1 : 0;
+#endif
+         break;
+      case SPEEX_ECHO_GET_DOUBLETALK_PROB:
+#ifdef FIXED_POINT
+         (*(spx_int32_t*)ptr) = st->double_talk;
+#else
+         (*(spx_int32_t*)ptr) = (spx_int32_t)(32768.f*st->double_talk + .5f);
+#endif
+         break;
+      case SPEEX_ECHO_SET_DT_ADAPT_FLOOR:
+      {
+         spx_int32_t val = *(spx_int32_t*)ptr;
+         if (val < 0)
+            val = 0;
+         else if (val > 32767)
+            val = 32767;
+#ifdef FIXED_POINT
+         st->dt_adapt_floor = (spx_word16_t)val;
+#else
+         st->dt_adapt_floor = (spx_word16_t)(val/32768.f);
+#endif
+         break;
+      }
+      case SPEEX_ECHO_GET_DT_ADAPT_FLOOR:
+#ifdef FIXED_POINT
+         (*(spx_int32_t*)ptr) = st->dt_adapt_floor;
+#else
+         (*(spx_int32_t*)ptr) = (spx_int32_t)(32768.f*st->dt_adapt_floor + .5f);
+#endif
          break;
       case SPEEX_ECHO_GET_IMPULSE_RESPONSE_SIZE:
          /*FIXME: Implement this for multiple channels */

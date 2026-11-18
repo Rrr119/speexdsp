@@ -33,5 +33,6 @@ testjitter
 libtool
 speexdsp.pc
 stamp-*
+test-driver
 patches
 /m4

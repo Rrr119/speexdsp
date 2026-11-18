@@ -1,0 +1,9 @@
+generated far.sw, near.sw, mic.sw and config.txt (500 frames) in testecho_dtd.data
+AEC double-talk test:
+  ERLE (far-end only)          :  19.35 dB  (min 12.0)
+  Near-end gain, AEC only      :  0.455   (min 0.40)
+  Near-end gain, AEC+RESS      :  0.359   (min 0.30)
+  DTD hit rate in DT windows   :  0.841   (min 0.70)
+  DTD false alarm, far-only    :  0.052   (max 0.20)
+PASS
+PASS test_echo_doubletalk.sh (exit status: 0)

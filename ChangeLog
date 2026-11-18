@@ -1,3 +1,17 @@
+2026-11-19  SpeexDSP contributors
+
+	Double-talk aware acoustic echo cancellation:
+	* libspeexdsp/mdf.c: add an explicit double-talk detector combining a
+	  normalized mic/echo cross-correlation with a Geigel power ratio, gated
+	  by an entry/exit confirmation state machine; scale the adaptive filter
+	  step down (to a configurable floor) while double-talk is detected.
+	* libspeexdsp/preprocess.c: relax residual echo suppression and stop the
+	  residual-echo max-hold during double-talk so near-end speech survives.
+	* include/speex/speex_echo.h, include/speex/speex_preprocess.h: new
+	  double-talk query and suppression control requests.
+	* libspeexdsp/testecho_dtd_gen.c, libspeexdsp/testecho_dtd.c: synthetic
+	  test audio generator and ERLE/preservation/DTD accuracy test.
+
 2005-09-07  Thomas Vander Stichele  <thomas at apestaart dot org>
 
 	* libspeex/cb_search.c: (split_cb_search_shape_sign_N1):
